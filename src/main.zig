@@ -20,28 +20,36 @@ const GameObject = struct {
         return self.updateFn(self.ptr);
     }
 
-    fn draw(self: *Self) !void {
+    fn draw(self: Self) !void {
         return self.drawFn(self.ptr);
     }
 
-    fn deinit(self: *Self) !void {
+    fn deinit(self: Self) !void {
         return self.deinitFn(self.ptr);
     }
 };
 
 const GameState = struct {
     const Self = @This();
-    objects: std.ArrayList(*GameObject),
+    objects: std.ArrayList(GameObject),
+    objects_poll: std.ArrayList(GameObject),
     alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator) Self {
-        return .{ .alloc = alloc, .objects = std.ArrayList(*GameObject).init(alloc) };
+        return .{ .alloc = alloc, .objects = std.ArrayList(GameObject).init(alloc), .objects_poll = std.ArrayList(GameObject).init(alloc) };
+    }
+
+    fn addObject(self: *Self, obj: GameObject) !void {
+        try self.objects_poll.append(obj);
     }
 
     fn update(self: *Self) !void {
         for (self.objects.items) |o| {
             try o.update();
         }
+
+        try self.objects.appendSlice(self.objects_poll.items);
+        self.objects_poll.clearRetainingCapacity();
     }
 
     fn draw(self: *Self) !void {
@@ -55,6 +63,7 @@ const GameState = struct {
             try o.deinit();
         }
         self.objects.deinit();
+        self.objects_poll.deinit();
     }
 };
 
@@ -65,7 +74,7 @@ const Bullet = struct {
     speed: f32,
     alloc: std.mem.Allocator,
 
-    fn init(alloc: std.mem.Allocator, x: f32, y: f32) !*GameObject {
+    fn init(alloc: std.mem.Allocator, x: f32, y: f32) !GameObject {
         const bullet = try alloc.create(Self);
 
         bullet.* = Self{
@@ -75,16 +84,12 @@ const Bullet = struct {
             .speed = 1000.0,
         };
 
-        const obj = try alloc.create(GameObject);
-
-        obj.* = GameObject{
+        return GameObject{
             .ptr = bullet,
             .deinitFn = deinit,
             .updateFn = update,
             .drawFn = draw,
         };
-
-        return obj;
     }
 
     fn deinit(ptr: *anyopaque) void {
@@ -153,7 +158,7 @@ const Player = struct {
 
         if (rl.IsKeyPressed(rl.KEY_SPACE)) {
             const bullet = try Bullet.init(self.alloc, self.x, self.y + 10);
-            try gameState.objects.append(bullet);
+            try gameState.addObject(bullet);
         }
     }
 };
@@ -166,9 +171,8 @@ pub fn main() !void {
         }
     }
 
-    var player = try Player.init(gpa_allocator);
-
-    try gameState.objects.append(&player);
+    const player = try Player.init(gpa_allocator);
+    try gameState.addObject(player);
     defer gameState.deinit();
 
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT | rl.FLAG_VSYNC_HINT);
