@@ -20,14 +20,15 @@ fn Vector2D(T: type) type {
 const GameState = struct {
     const Self = @This();
 
-    nextId: u64,
+    score: u64,
+    next_object_id: u64,
     objects: std.AutoHashMap(u64, *GameObject),
     objects_add_poll: std.AutoHashMap(*GameObject, *GameObject),
     objects_remove_poll: std.AutoHashMap(*GameObject, *GameObject),
     alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator) Self {
-        return .{ .alloc = alloc, .nextId = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc), .objects_remove_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc) };
+        return Self{ .alloc = alloc, .next_object_id = 0, .score = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc), .objects_remove_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc) };
     }
 
     fn deinit(self: *Self) void {
@@ -62,8 +63,16 @@ const GameState = struct {
         return arr;
     }
 
+    fn scoreHit(self: *Self) void {
+        self.score += 10;
+    }
+
+    fn scoreKill(self: *Self) void {
+        self.score += 30;
+    }
+
     fn update(self: *Self) !void {
-        std.log.warn("Object count = {}\n", .{self.objects.count()});
+        std.log.warn("Object count = {}\n Score = {}", .{ self.objects.count(), self.score });
         var it = self.objects.iterator();
         while (it.next()) |object| {
             try object.value_ptr.*.update();
@@ -127,7 +136,7 @@ const GameObject = struct {
 
         object.* = GameObject{
             .alloc = alloc,
-            .id = gameState.nextId,
+            .id = gameState.next_object_id,
             .tag = tag,
             .ptr = ptr,
             .updateFn = updateFn,
@@ -135,7 +144,7 @@ const GameObject = struct {
             .deinitFn = deinitFn,
         };
 
-        gameState.nextId += 1;
+        gameState.next_object_id += 1;
 
         return object;
     }
@@ -330,8 +339,10 @@ const Enemy = struct {
                     const width: f32 = @floatFromInt(self.size.x);
                     const height: f32 = @floatFromInt(self.size.y);
                     self.pos = Vector2D(f32){ .x = self.pos.x + width / 2, .y = self.pos.y + height / 2 };
+                    gameState.scoreHit();
                 } else {
                     try gameState.removeObject(self.object);
+                    gameState.scoreKill();
                 }
             }
         }
@@ -344,7 +355,6 @@ const Enemy = struct {
     fn draw(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         rl.DrawRectangle(@intFromFloat(self.pos.x), @intFromFloat(self.pos.y), @intCast(self.size.x), @intCast(self.size.y), rl.RED);
-        rl.DrawRectangleLinesEx(self.getRect(), 1, rl.GREEN);
     }
 };
 
@@ -353,22 +363,22 @@ const EnemySpawner = struct {
 
     alloc: std.mem.Allocator,
     spawnRate: i64,
-    lastSpawnEllapsed: i64,
+    lastSpawn: i64,
     obj: *GameObject,
 
     fn init(alloc: std.mem.Allocator) !*Self {
         const spawn = try alloc.create(Self);
         const obj = try GameObject.init(alloc, spawn, GameObjectTag.General, update, null, deinit);
-        spawn.* = Self{ .alloc = alloc, .obj = obj, .lastSpawnEllapsed = 0, .spawnRate = 900 };
+        spawn.* = Self{ .alloc = alloc, .obj = obj, .lastSpawn = 0, .spawnRate = 900 };
         return spawn;
     }
 
     fn update(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        if (std.time.milliTimestamp() - self.lastSpawnEllapsed > self.spawnRate) {
+        if (std.time.milliTimestamp() - self.lastSpawn > self.spawnRate) {
             const r_number = utils.generateRandomInt(20, ScreenSize.y - 20);
-            const size = math.clamp(r_number, 20, ScreenSize.y / 8);
+            const size = math.clamp(r_number, 20, ScreenSize.y / 4);
 
             const enemy = try Enemy.init(
                 self.alloc,
@@ -382,8 +392,34 @@ const EnemySpawner = struct {
             );
 
             try gameState.addObject(enemy.object);
-            self.lastSpawnEllapsed = std.time.milliTimestamp();
+            self.lastSpawn = std.time.milliTimestamp();
         }
+    }
+
+    fn deinit(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.alloc.destroy(self);
+    }
+};
+
+const Gui = struct {
+    const Self = @This();
+
+    alloc: std.mem.Allocator,
+    obj: *GameObject,
+
+    fn init(alloc: std.mem.Allocator) !*Self {
+        const gui = try alloc.create(Self);
+        const obj = try GameObject.init(alloc, gui, GameObjectTag.General, null, draw, deinit);
+        gui.* = Self{ .alloc = alloc, .obj = obj };
+        return gui;
+    }
+
+    fn draw(ptr: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const txt = try std.fmt.allocPrintZ(self.alloc, "{}", .{gameState.score});
+        defer self.alloc.free(txt);
+        rl.DrawText(txt, 10, 10, 40, rl.WHITE);
     }
 
     fn deinit(ptr: *anyopaque) void {
@@ -408,6 +444,9 @@ pub fn main() !void {
     const enemy_spawner = try EnemySpawner.init(gpa_allocator);
     try gameState.addObject(enemy_spawner.obj);
 
+    const gui = try Gui.init(gpa_allocator);
+    try gameState.addObject(gui.obj);
+
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT | rl.FLAG_VSYNC_HINT);
     rl.InitWindow(ScreenSize.x, ScreenSize.y, "Spacers");
     defer rl.CloseWindow();
@@ -419,6 +458,7 @@ pub fn main() !void {
             defer rl.EndDrawing();
 
             try gameState.draw();
+
             rl.ClearBackground(rl.BLACK);
             rl.DrawFPS(ScreenSize.x - 100, 10);
         }
