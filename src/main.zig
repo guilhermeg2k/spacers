@@ -6,7 +6,7 @@ const utils = @import("utils.zig");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const gpa_allocator = gpa.allocator();
 
-const ScreenSize = Vector2D(u12){ .x = 1280, .y = 720 };
+const ScreenSize = Vector2D(u12){ .x = 1366, .y = 768 };
 
 var gameState = GameState.init(gpa_allocator);
 
@@ -242,7 +242,7 @@ const Bullet = struct {
     }
 
     fn getRect(self: *Self) rl.Rectangle {
-        return .{ .x = self.pos.x, .y = self.pos.y, .width = @floatFromInt(self.size.x), .height = @floatFromInt(self.size.y) };
+        return .{ .x = self.pos.x, .y = self.pos.y, .width = @floatFromInt(self.size.x), .height = @floatFromInt(self.size.y + 5) };
     }
 
     fn draw(ptr: *anyopaque) !void {
@@ -272,6 +272,7 @@ const Enemy = struct {
     alloc: std.mem.Allocator,
     pos: Vector2D(f32),
     size: Vector2D(u32),
+    minSize: u32,
     ySpawn: f32,
     speed: f32,
     movType: EnemyMovType,
@@ -287,6 +288,7 @@ const Enemy = struct {
             .pos = .{ .x = ScreenSize.x, .y = ySpawn },
             .size = size,
             .ySpawn = ySpawn,
+            .minSize = 40,
             .speed = speed,
             .movType = movType,
             .object = object,
@@ -321,19 +323,28 @@ const Enemy = struct {
             const b: *Bullet = @ptrCast(@alignCast(bullet.ptr));
 
             if (rl.CheckCollisionRecs(self.getRect(), b.getRect())) {
-                try gameState.removeObject(self.object);
                 try gameState.removeObject(b.object);
+                if (self.size.x / 2 > self.minSize) {
+                    const resizeBy = 2;
+                    self.size = .{ .x = self.size.x / resizeBy, .y = self.size.y / resizeBy };
+                    const width: f32 = @floatFromInt(self.size.x);
+                    const height: f32 = @floatFromInt(self.size.y);
+                    self.pos = Vector2D(f32){ .x = self.pos.x + width / 2, .y = self.pos.y + height / 2 };
+                } else {
+                    try gameState.removeObject(self.object);
+                }
             }
         }
     }
 
     fn getRect(self: *Self) rl.Rectangle {
-        return .{ .x = self.pos.x, .y = self.pos.y, .width = @floatFromInt(self.size.x), .height = @floatFromInt(self.size.y) };
+        return .{ .x = self.pos.x, .y = self.pos.y - 5, .width = @floatFromInt(self.size.x), .height = @floatFromInt(self.size.y + 10) };
     }
 
     fn draw(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         rl.DrawRectangle(@intFromFloat(self.pos.x), @intFromFloat(self.pos.y), @intCast(self.size.x), @intCast(self.size.y), rl.RED);
+        rl.DrawRectangleLinesEx(self.getRect(), 1, rl.GREEN);
     }
 };
 
@@ -356,8 +367,9 @@ const EnemySpawner = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         if (std.time.milliTimestamp() - self.lastSpawnEllapsed > self.spawnRate) {
-            const r_number = utils.generateRandomInt(0, ScreenSize.y);
+            const r_number = utils.generateRandomInt(20, ScreenSize.y - 20);
             const size = math.clamp(r_number, 20, ScreenSize.y / 8);
+
             const enemy = try Enemy.init(
                 self.alloc,
                 .{
@@ -368,6 +380,7 @@ const EnemySpawner = struct {
                 300,
                 if (r_number % 2 == 1) EnemyMovType.straigth else EnemyMovType.zigZag,
             );
+
             try gameState.addObject(enemy.object);
             self.lastSpawnEllapsed = std.time.milliTimestamp();
         }
