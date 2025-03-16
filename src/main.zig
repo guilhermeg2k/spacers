@@ -8,62 +8,113 @@ var gameState = GameState.init(gpa_allocator);
 
 const ScreenSize = .{ .x = 1280, .y = 720 };
 
+const GameState = struct {
+    const Self = @This();
+
+    nextId: u64,
+    objects: std.AutoHashMap(u64, *GameObject),
+    objects_add_poll: std.ArrayList(*GameObject),
+    objects_remove_poll: std.ArrayList(*GameObject),
+    alloc: std.mem.Allocator,
+
+    fn init(alloc: std.mem.Allocator) Self {
+        return .{ .alloc = alloc, .nextId = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.ArrayList(*GameObject).init(alloc), .objects_remove_poll = std.ArrayList(*GameObject).init(alloc) };
+    }
+
+    fn addObject(self: *Self, obj: *GameObject) !void {
+        try self.objects_add_poll.append(obj);
+    }
+
+    fn removeObject(self: *Self, obj: *GameObject) !void {
+        try self.objects_remove_poll.append(obj);
+    }
+
+    fn update(self: *Self) !void {
+        std.log.warn("Object count = {}\n", .{self.objects.count()});
+        var it = self.objects.iterator();
+        while (it.next()) |object| {
+            try object.value_ptr.*.update();
+        }
+
+        for (self.objects_add_poll.items) |o| {
+            try self.objects.put(o.id, o);
+        }
+
+        for (self.objects_remove_poll.items) |o| {
+            const object = self.objects.get(o.id);
+            if (object) |obj| {
+                _ = self.objects.remove(obj.id);
+                obj.deinit();
+            }
+        }
+
+        self.objects_add_poll.clearRetainingCapacity();
+        self.objects_remove_poll.clearRetainingCapacity();
+    }
+
+    fn draw(self: *Self) !void {
+        var it = self.objects.iterator();
+        while (it.next()) |object| {
+            try object.value_ptr.*.draw();
+        }
+    }
+
+    fn deinit(self: *Self) void {
+        var it = self.objects.iterator();
+        while (it.next()) |object| {
+            object.value_ptr.*.deinit();
+        }
+
+        self.objects.deinit();
+        self.objects_add_poll.deinit();
+        self.objects_remove_poll.deinit();
+    }
+};
+
 const GameObject = struct {
     const Self = @This();
 
+    alloc: std.mem.Allocator,
+    id: u64,
     ptr: *anyopaque,
     updateFn: *const fn (ptr: *anyopaque) anyerror!void,
     drawFn: *const fn (ptr: *anyopaque) anyerror!void,
     deinitFn: *const fn (ptr: *anyopaque) void,
 
-    fn update(self: Self) !void {
-        return self.updateFn(self.ptr);
-    }
+    fn init(
+        alloc: std.mem.Allocator,
+        ptr: *anyopaque,
+        updateFn: *const fn (ptr: *anyopaque) anyerror!void,
+        drawFn: *const fn (ptr: *anyopaque) anyerror!void,
+        deinitFn: *const fn (ptr: *anyopaque) void,
+    ) !*Self {
+        const object = try alloc.create(GameObject);
 
-    fn draw(self: Self) !void {
-        return self.drawFn(self.ptr);
-    }
+        object.* = GameObject{
+            .alloc = alloc,
+            .id = gameState.nextId,
+            .ptr = ptr,
+            .updateFn = updateFn,
+            .drawFn = drawFn,
+            .deinitFn = deinitFn,
+        };
 
-    fn deinit(self: Self) !void {
-        return self.deinitFn(self.ptr);
-    }
-};
+        gameState.nextId += 1;
 
-const GameState = struct {
-    const Self = @This();
-    objects: std.ArrayList(GameObject),
-    objects_poll: std.ArrayList(GameObject),
-    alloc: std.mem.Allocator,
-
-    fn init(alloc: std.mem.Allocator) Self {
-        return .{ .alloc = alloc, .objects = std.ArrayList(GameObject).init(alloc), .objects_poll = std.ArrayList(GameObject).init(alloc) };
-    }
-
-    fn addObject(self: *Self, obj: GameObject) !void {
-        try self.objects_poll.append(obj);
+        return object;
     }
 
     fn update(self: *Self) !void {
-        for (self.objects.items) |o| {
-            try o.update();
-        }
-
-        try self.objects.appendSlice(self.objects_poll.items);
-        self.objects_poll.clearRetainingCapacity();
+        return self.updateFn(self.ptr);
     }
 
     fn draw(self: *Self) !void {
-        for (self.objects.items) |o| {
-            try o.draw();
-        }
+        return self.drawFn(self.ptr);
     }
 
     fn deinit(self: *Self) void {
-        for (self.objects.items) |o| {
-            try o.deinit();
-        }
-        self.objects.deinit();
-        self.objects_poll.deinit();
+        self.deinitFn(self.ptr);
+        self.alloc.destroy(self);
     }
 };
 
@@ -73,23 +124,21 @@ const Bullet = struct {
     y: f32,
     speed: f32,
     alloc: std.mem.Allocator,
+    object: *GameObject,
 
-    fn init(alloc: std.mem.Allocator, x: f32, y: f32) !GameObject {
+    fn init(alloc: std.mem.Allocator, x: f32, y: f32) !*Bullet {
         const bullet = try alloc.create(Self);
+        const object = try GameObject.init(alloc, bullet, update, draw, deinit);
 
         bullet.* = Self{
             .x = x,
             .y = y,
             .alloc = alloc,
             .speed = 1000.0,
+            .object = object,
         };
 
-        return GameObject{
-            .ptr = bullet,
-            .deinitFn = deinit,
-            .updateFn = update,
-            .drawFn = draw,
-        };
+        return bullet;
     }
 
     fn deinit(ptr: *anyopaque) void {
@@ -106,27 +155,30 @@ const Bullet = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const delta_time = rl.GetFrameTime();
         self.x += delta_time * self.speed;
+
+        if (self.x > ScreenSize.x) {
+            try gameState.removeObject(self.object);
+        }
     }
 };
 
 const Player = struct {
     const Self = @This();
 
+    alloc: std.mem.Allocator,
     x: f32,
     y: f32,
     speed: f32,
-    alloc: std.mem.Allocator,
+    object: *GameObject,
 
-    fn init(alloc: std.mem.Allocator) !GameObject {
+    fn init(alloc: std.mem.Allocator) !*Player {
         const player = try alloc.create(Self);
-        player.* = Self{ .alloc = alloc, .speed = 700.0, .x = ScreenSize.x / 2, .y = ScreenSize.y / 2 };
 
-        return GameObject{
-            .ptr = player,
-            .updateFn = update,
-            .drawFn = draw,
-            .deinitFn = deinit,
-        };
+        const object = try GameObject.init(alloc, player, update, draw, deinit);
+
+        player.* = Self{ .alloc = alloc, .speed = 700.0, .x = ScreenSize.x / 2, .y = ScreenSize.y / 2, .object = object };
+
+        return player;
     }
 
     fn deinit(ptr: *anyopaque) void {
@@ -158,7 +210,7 @@ const Player = struct {
 
         if (rl.IsKeyPressed(rl.KEY_SPACE)) {
             const bullet = try Bullet.init(self.alloc, self.x, self.y + 10);
-            try gameState.addObject(bullet);
+            try gameState.addObject(bullet.object);
         }
     }
 };
@@ -172,7 +224,7 @@ pub fn main() !void {
     }
 
     const player = try Player.init(gpa_allocator);
-    try gameState.addObject(player);
+    try gameState.addObject(player.object);
     defer gameState.deinit();
 
     rl.SetConfigFlags(rl.FLAG_MSAA_4X_HINT | rl.FLAG_VSYNC_HINT);
@@ -182,9 +234,10 @@ pub fn main() !void {
     while (!rl.WindowShouldClose()) {
         try gameState.update();
         {
-            try gameState.draw();
             rl.BeginDrawing();
             defer rl.EndDrawing();
+
+            try gameState.draw();
             rl.ClearBackground(rl.BLACK);
             rl.DrawFPS(ScreenSize.x - 100, 10);
         }
