@@ -6,29 +6,60 @@ const utils = @import("utils.zig");
 var gpa = std.heap.GeneralPurposeAllocator(.{}){};
 const gpa_allocator = gpa.allocator();
 
-const ScreenSize = .{ .x = 1280, .y = 720 };
+const ScreenSize = Vector2D(u12){ .x = 1280, .y = 720 };
 
 var gameState = GameState.init(gpa_allocator);
+
+fn Vector2D(T: type) type {
+    return struct {
+        x: T,
+        y: T,
+    };
+}
 
 const GameState = struct {
     const Self = @This();
 
     nextId: u64,
     objects: std.AutoHashMap(u64, *GameObject),
-    objects_add_poll: std.ArrayList(*GameObject),
-    objects_remove_poll: std.ArrayList(*GameObject),
+    objects_add_poll: std.AutoHashMap(*GameObject, *GameObject),
+    objects_remove_poll: std.AutoHashMap(*GameObject, *GameObject),
     alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator) Self {
-        return .{ .alloc = alloc, .nextId = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.ArrayList(*GameObject).init(alloc), .objects_remove_poll = std.ArrayList(*GameObject).init(alloc) };
+        return .{ .alloc = alloc, .nextId = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc), .objects_remove_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc) };
+    }
+
+    fn deinit(self: *Self) void {
+        var it = self.objects.iterator();
+        while (it.next()) |object| {
+            object.value_ptr.*.deinit();
+        }
+
+        self.objects.deinit();
+        self.objects_add_poll.deinit();
+        self.objects_remove_poll.deinit();
     }
 
     fn addObject(self: *Self, obj: *GameObject) !void {
-        try self.objects_add_poll.append(obj);
+        try self.objects_add_poll.put(obj, obj);
     }
 
     fn removeObject(self: *Self, obj: *GameObject) !void {
-        try self.objects_remove_poll.append(obj);
+        try self.objects_remove_poll.put(obj, obj);
+    }
+
+    fn getObjectsByTag(self: *Self, tag: GameObjectTag) !std.ArrayList(*GameObject) {
+        var it = self.objects.iterator();
+        var arr = std.ArrayList(*GameObject).init(self.alloc);
+
+        while (it.next()) |object| {
+            if (object.value_ptr.*.tag == tag) {
+                try arr.append(object.value_ptr.*);
+            }
+        }
+
+        return arr;
     }
 
     fn update(self: *Self) !void {
@@ -38,13 +69,17 @@ const GameState = struct {
             try object.value_ptr.*.update();
         }
 
-        for (self.objects_add_poll.items) |o| {
+        var it2 = self.objects_add_poll.iterator();
+        while (it2.next()) |object| {
+            const o = object.value_ptr.*;
             try self.objects.put(o.id, o);
         }
 
-        for (self.objects_remove_poll.items) |o| {
-            const object = self.objects.get(o.id);
-            if (object) |obj| {
+        var it3 = self.objects_remove_poll.iterator();
+        while (it3.next()) |object| {
+            const o = object.value_ptr.*;
+            const _object = self.objects.get(o.id);
+            if (_object) |obj| {
                 _ = self.objects.remove(obj.id);
                 obj.deinit();
             }
@@ -60,17 +95,13 @@ const GameState = struct {
             try object.value_ptr.*.draw();
         }
     }
+};
 
-    fn deinit(self: *Self) void {
-        var it = self.objects.iterator();
-        while (it.next()) |object| {
-            object.value_ptr.*.deinit();
-        }
-
-        self.objects.deinit();
-        self.objects_add_poll.deinit();
-        self.objects_remove_poll.deinit();
-    }
+const GameObjectTag = enum {
+    General,
+    Player,
+    Enemy,
+    Bullet,
 };
 
 const GameObject = struct {
@@ -78,6 +109,7 @@ const GameObject = struct {
 
     alloc: std.mem.Allocator,
     id: u64,
+    tag: GameObjectTag,
     ptr: *anyopaque,
     updateFn: ?*const fn (ptr: *anyopaque) anyerror!void,
     drawFn: ?*const fn (ptr: *anyopaque) anyerror!void,
@@ -86,6 +118,7 @@ const GameObject = struct {
     fn init(
         alloc: std.mem.Allocator,
         ptr: *anyopaque,
+        tag: GameObjectTag,
         updateFn: ?*const fn (ptr: *anyopaque) anyerror!void,
         drawFn: ?*const fn (ptr: *anyopaque) anyerror!void,
         deinitFn: ?*const fn (ptr: *anyopaque) void,
@@ -95,6 +128,7 @@ const GameObject = struct {
         object.* = GameObject{
             .alloc = alloc,
             .id = gameState.nextId,
+            .tag = tag,
             .ptr = ptr,
             .updateFn = updateFn,
             .drawFn = drawFn,
@@ -138,7 +172,7 @@ const Player = struct {
     fn init(alloc: std.mem.Allocator) !*Player {
         const player = try alloc.create(Self);
 
-        const object = try GameObject.init(alloc, player, update, draw, deinit);
+        const object = try GameObject.init(alloc, player, GameObjectTag.Player, update, draw, deinit);
 
         player.* = Self{ .alloc = alloc, .speed = 700.0, .x = ScreenSize.x / 2, .y = ScreenSize.y / 2, .object = object };
 
@@ -173,7 +207,7 @@ const Player = struct {
         if (is_moving_right) self.x = @min(self.x + 1 * self.speed * delta_time, ScreenSize.x - 30);
 
         if (rl.IsKeyPressed(rl.KEY_SPACE)) {
-            const bullet = try Bullet.init(self.alloc, self.x, self.y + 10);
+            const bullet = try Bullet.init(self.alloc, .{ .x = self.x, .y = self.y + 10 });
             try gameState.addObject(bullet.object);
         }
     }
@@ -181,19 +215,19 @@ const Player = struct {
 
 const Bullet = struct {
     const Self = @This();
-    x: f32,
-    y: f32,
+    pos: Vector2D(f32),
+    size: Vector2D(u32),
     speed: f32,
     alloc: std.mem.Allocator,
     object: *GameObject,
 
-    fn init(alloc: std.mem.Allocator, x: f32, y: f32) !*Bullet {
+    fn init(alloc: std.mem.Allocator, pos: Vector2D(f32)) !*Bullet {
         const bullet = try alloc.create(Self);
-        const object = try GameObject.init(alloc, bullet, update, draw, deinit);
+        const object = try GameObject.init(alloc, bullet, GameObjectTag.Bullet, update, draw, deinit);
 
         bullet.* = Self{
-            .x = x,
-            .y = y,
+            .pos = pos,
+            .size = .{ .x = 10, .y = 2 },
             .alloc = alloc,
             .speed = 1000.0,
             .object = object,
@@ -207,43 +241,54 @@ const Bullet = struct {
         self.alloc.destroy(self);
     }
 
+    fn getRect(self: *Self) rl.Rectangle {
+        return .{ .x = self.pos.x, .y = self.pos.y, .width = @floatFromInt(self.size.x), .height = @floatFromInt(self.size.y) };
+    }
+
     fn draw(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        rl.DrawRectangle(@intFromFloat(self.x), @intFromFloat(self.y), 10, 2, rl.WHITE);
+        rl.DrawRectangle(@intFromFloat(self.pos.x), @intFromFloat(self.pos.y), @intCast(self.size.x), @intCast(self.size.y), rl.WHITE);
     }
 
     fn update(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const delta_time = rl.GetFrameTime();
-        self.x += delta_time * self.speed;
+        self.pos.x += delta_time * self.speed;
 
-        if (self.x > ScreenSize.x) {
+        if (self.pos.x > ScreenSize.x) {
             try gameState.removeObject(self.object);
         }
     }
+};
+
+const EnemyMovType = enum {
+    straigth,
+    zigZag,
 };
 
 const Enemy = struct {
     const Self = @This();
 
     alloc: std.mem.Allocator,
-    x: f32,
-    y: f32,
-    yy: f32,
+    pos: Vector2D(f32),
+    size: Vector2D(u32),
+    ySpawn: f32,
     speed: f32,
+    movType: EnemyMovType,
     object: *GameObject,
 
-    fn init(alloc: std.mem.Allocator, x: f32, y: f32, speed: f32) !*Self {
+    fn init(alloc: std.mem.Allocator, size: Vector2D(u32), ySpawn: f32, speed: f32, movType: EnemyMovType) !*Self {
         const enemy = try alloc.create(Self);
 
-        const object = try GameObject.init(alloc, enemy, update, draw, deinit);
+        const object = try GameObject.init(alloc, enemy, GameObjectTag.Enemy, update, draw, deinit);
 
         enemy.* = Self{
             .alloc = alloc,
-            .x = x,
-            .y = y,
-            .yy = y,
+            .pos = .{ .x = ScreenSize.x, .y = ySpawn },
+            .size = size,
+            .ySpawn = ySpawn,
             .speed = speed,
+            .movType = movType,
             .object = object,
         };
 
@@ -259,17 +304,36 @@ const Enemy = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const delta_time = rl.GetFrameTime();
 
-        self.x -= delta_time * self.speed;
-        self.y = (math.sin((self.x + self.yy) / self.speed * 5) + 1) / 2 * (ScreenSize.y - 50);
+        self.pos.x -= delta_time * self.speed;
 
-        if (self.x < 0) {
+        if (self.movType == EnemyMovType.zigZag) {
+            self.pos.y = (math.sin((self.pos.x + self.ySpawn) / self.speed * 2) + 1) / 2 * (ScreenSize.y - 50);
+        }
+
+        if (self.pos.x < 0) {
             try gameState.removeObject(self.object);
         }
+
+        const bullets = try gameState.getObjectsByTag(GameObjectTag.Bullet);
+        defer bullets.deinit();
+
+        for (bullets.items) |bullet| {
+            const b: *Bullet = @ptrCast(@alignCast(bullet.ptr));
+
+            if (rl.CheckCollisionRecs(self.getRect(), b.getRect())) {
+                try gameState.removeObject(self.object);
+                try gameState.removeObject(b.object);
+            }
+        }
+    }
+
+    fn getRect(self: *Self) rl.Rectangle {
+        return .{ .x = self.pos.x, .y = self.pos.y, .width = @floatFromInt(self.size.x), .height = @floatFromInt(self.size.y) };
     }
 
     fn draw(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        rl.DrawRectangle(@intFromFloat(self.x), @intFromFloat(self.y), 50, 50, rl.RED);
+        rl.DrawRectangle(@intFromFloat(self.pos.x), @intFromFloat(self.pos.y), @intCast(self.size.x), @intCast(self.size.y), rl.RED);
     }
 };
 
@@ -283,8 +347,8 @@ const EnemySpawner = struct {
 
     fn init(alloc: std.mem.Allocator) !*Self {
         const spawn = try alloc.create(Self);
-        const obj = try GameObject.init(alloc, spawn, update, null, deinit);
-        spawn.* = Self{ .alloc = alloc, .obj = obj, .lastSpawnEllapsed = 0, .spawnRate = 100 };
+        const obj = try GameObject.init(alloc, spawn, GameObjectTag.General, update, null, deinit);
+        spawn.* = Self{ .alloc = alloc, .obj = obj, .lastSpawnEllapsed = 0, .spawnRate = 900 };
         return spawn;
     }
 
@@ -293,7 +357,17 @@ const EnemySpawner = struct {
 
         if (std.time.milliTimestamp() - self.lastSpawnEllapsed > self.spawnRate) {
             const r_number = utils.generateRandomInt(0, ScreenSize.y);
-            const enemy = try Enemy.init(self.alloc, ScreenSize.x, @floatFromInt(r_number), 500);
+            const size = math.clamp(r_number, 20, ScreenSize.y / 8);
+            const enemy = try Enemy.init(
+                self.alloc,
+                .{
+                    .x = size,
+                    .y = size,
+                },
+                @floatFromInt(r_number),
+                300,
+                if (r_number % 2 == 1) EnemyMovType.straigth else EnemyMovType.zigZag,
+            );
             try gameState.addObject(enemy.object);
             self.lastSpawnEllapsed = std.time.milliTimestamp();
         }
