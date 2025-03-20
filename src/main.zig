@@ -20,15 +20,21 @@ fn Vector2D(T: type) type {
 const GameState = struct {
     const Self = @This();
 
+    alloc: std.mem.Allocator,
     score: u64,
+    player: ?*GameObject,
+
     next_object_id: u64,
     objects: std.AutoHashMap(u64, *GameObject),
     objects_add_poll: std.AutoHashMap(*GameObject, *GameObject),
     objects_remove_poll: std.AutoHashMap(*GameObject, *GameObject),
-    alloc: std.mem.Allocator,
 
     fn init(alloc: std.mem.Allocator) Self {
-        return Self{ .alloc = alloc, .next_object_id = 0, .score = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc), .objects_remove_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc) };
+        return Self{ .alloc = alloc, .player = null, .next_object_id = 0, .score = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc), .objects_remove_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc) };
+    }
+
+    fn setPlayer(self: *Self, player: *GameObject) void {
+        self.player = player;
     }
 
     fn deinit(self: *Self) void {
@@ -82,6 +88,10 @@ const GameState = struct {
         while (it2.next()) |object| {
             const o = object.value_ptr.*;
             try self.objects.put(o.id, o);
+
+            if (o.tag == GameObjectTag.Player) {
+                self.setPlayer(o);
+            }
         }
 
         var it3 = self.objects_remove_poll.iterator();
@@ -175,6 +185,7 @@ const Player = struct {
     alloc: std.mem.Allocator,
     x: f32,
     y: f32,
+    size: Vector2D(f32),
     speed: f32,
     object: *GameObject,
 
@@ -183,7 +194,7 @@ const Player = struct {
 
         const object = try GameObject.init(alloc, player, GameObjectTag.Player, update, draw, deinit);
 
-        player.* = Self{ .alloc = alloc, .speed = 700.0, .x = ScreenSize.x / 2, .y = ScreenSize.y / 2, .object = object };
+        player.* = Self{ .alloc = alloc, .speed = 700.0, .x = ScreenSize.x / 2, .y = ScreenSize.y / 2, .object = object, .size = .{ .x = 30, .y = 20 } };
 
         return player;
     }
@@ -200,7 +211,7 @@ const Player = struct {
 
     fn draw(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        rl.DrawTriangle(.{ .x = self.x, .y = self.y }, .{ .x = self.x, .y = self.y + 20 }, .{ .x = self.x + 30, .y = self.y + 10 }, rl.WHITE);
+        rl.DrawTriangle(.{ .x = self.x, .y = self.y }, .{ .x = self.x, .y = self.y + self.size.y }, .{ .x = self.x + self.size.x, .y = self.y + self.size.y / 2 }, rl.WHITE);
     }
 
     fn handleInput(self: *Self) !void {
@@ -211,14 +222,18 @@ const Player = struct {
         const is_moving_right = rl.IsKeyDown(rl.KEY_D);
 
         if (is_moving_up) self.y = @max(self.y - 1 * self.speed * delta_time, 0);
-        if (is_moving_down) self.y = @min(self.y + 1 * self.speed * delta_time, ScreenSize.y - 20);
+        if (is_moving_down) self.y = @min(self.y + 1 * self.speed * delta_time, ScreenSize.y - self.size.y);
         if (is_moving_left) self.x = @max(self.x - 1 * self.speed * delta_time, 0);
-        if (is_moving_right) self.x = @min(self.x + 1 * self.speed * delta_time, ScreenSize.x - 30);
+        if (is_moving_right) self.x = @min(self.x + 1 * self.speed * delta_time, ScreenSize.x - self.size.x);
 
         if (rl.IsKeyPressed(rl.KEY_SPACE)) {
-            const bullet = try Bullet.init(self.alloc, .{ .x = self.x, .y = self.y + 10 });
+            const bullet = try Bullet.init(self.alloc, .{ .x = self.x, .y = self.y + self.size.y / 2 });
             try gameState.addObject(bullet.object);
         }
+    }
+
+    fn getRect(self: *Self) rl.Rectangle {
+        return .{ .x = self.x, .y = self.y, .width = self.size.x, .height = self.size.y };
     }
 };
 
@@ -323,6 +338,13 @@ const Enemy = struct {
 
         if (self.pos.x < 0) {
             try gameState.removeObject(self.object);
+        }
+
+        if (gameState.player) |player| {
+            const p: *Player = @ptrCast(@alignCast(player.ptr));
+            if (rl.CheckCollisionRecs(self.getRect(), p.getRect())) {
+                gameState.score = 0;
+            }
         }
 
         const bullets = try gameState.getObjectsByTag(GameObjectTag.Bullet);
