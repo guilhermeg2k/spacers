@@ -21,16 +21,16 @@ const GameState = struct {
     const Self = @This();
 
     alloc: std.mem.Allocator,
-    score: u64,
+    score: i64,
     player: ?*GameObject,
 
     next_object_id: u64,
-    objects: std.AutoHashMap(u64, *GameObject),
-    objects_add_poll: std.AutoHashMap(*GameObject, *GameObject),
-    objects_remove_poll: std.AutoHashMap(*GameObject, *GameObject),
+    objects: std.AutoArrayHashMap(u64, *GameObject),
+    objects_add_poll: std.AutoArrayHashMap(*GameObject, *GameObject),
+    objects_remove_poll: std.AutoArrayHashMap(*GameObject, *GameObject),
 
     fn init(alloc: std.mem.Allocator) Self {
-        return Self{ .alloc = alloc, .player = null, .next_object_id = 0, .score = 0, .objects = std.AutoHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc), .objects_remove_poll = std.AutoHashMap(*GameObject, *GameObject).init(alloc) };
+        return Self{ .alloc = alloc, .player = null, .next_object_id = 0, .score = 0, .objects = std.AutoArrayHashMap(u64, *GameObject).init(alloc), .objects_add_poll = std.AutoArrayHashMap(*GameObject, *GameObject).init(alloc), .objects_remove_poll = std.AutoArrayHashMap(*GameObject, *GameObject).init(alloc) };
     }
 
     fn setPlayer(self: *Self, player: *GameObject) void {
@@ -77,6 +77,10 @@ const GameState = struct {
         self.score += 30;
     }
 
+    fn removeScore(self: *Self, amount: i64) void {
+        self.score = @max(0, self.score - amount);
+    }
+
     fn update(self: *Self) !void {
         std.log.warn("Object count = {}\n Score = {}", .{ self.objects.count(), self.score });
         var it = self.objects.iterator();
@@ -99,7 +103,7 @@ const GameState = struct {
             const o = object.value_ptr.*;
             const _object = self.objects.get(o.id);
             if (_object) |obj| {
-                _ = self.objects.remove(obj.id);
+                _ = self.objects.swapRemove(obj.id);
                 obj.deinit();
             }
         }
@@ -301,6 +305,7 @@ const Enemy = struct {
     speed: f32,
     movType: EnemyMovType,
     object: *GameObject,
+    color: rl.Color,
 
     fn init(alloc: std.mem.Allocator, size: Vector2D(u32), ySpawn: f32, speed: f32, movType: EnemyMovType) !*Self {
         const enemy = try alloc.create(Self);
@@ -316,6 +321,7 @@ const Enemy = struct {
             .speed = speed,
             .movType = movType,
             .object = object,
+            .color = utils.generateColor(),
         };
 
         return enemy;
@@ -337,6 +343,7 @@ const Enemy = struct {
         }
 
         if (self.pos.x < 0) {
+            gameState.removeScore(self.size.x * 3);
             try gameState.removeObject(self.object);
         }
 
@@ -376,7 +383,7 @@ const Enemy = struct {
 
     fn draw(ptr: *anyopaque) !void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        rl.DrawRectangle(@intFromFloat(self.pos.x), @intFromFloat(self.pos.y), @intCast(self.size.x), @intCast(self.size.y), rl.RED);
+        rl.DrawRectangle(@intFromFloat(self.pos.x), @intFromFloat(self.pos.y), @intCast(self.size.x), @intCast(self.size.y), self.color);
     }
 };
 
@@ -450,6 +457,93 @@ const Gui = struct {
     }
 };
 
+const Star = struct {
+    size: Vector2D(f32),
+    pos: Vector2D(f32),
+    color: rl.Color,
+    alpha: f32,
+    invert_alpha: bool,
+};
+
+const StarsBG = struct {
+    const Self = @This();
+    const NUMBER_OF_STARS = 100;
+
+    alloc: std.mem.Allocator,
+    stars: [NUMBER_OF_STARS]Star,
+    obj: *GameObject,
+
+    fn init(alloc: std.mem.Allocator) !*Self {
+        const bg = try alloc.create(Self);
+        const obj = try GameObject.init(alloc, bg, GameObjectTag.General, update, draw, deinit);
+
+        bg.* = Self{ .alloc = alloc, .obj = obj, .stars = [_]Star{.{
+            .size = .{ .x = 0, .y = 0 },
+            .pos = .{ .x = 0, .y = 0 },
+            .alpha = 0,
+            .invert_alpha = true,
+            .color = rl.WHITE,
+        }} ** NUMBER_OF_STARS };
+
+        bg.randomizeStars();
+        return bg;
+    }
+
+    fn randomizeStars(self: *Self) void {
+        for (&self.stars) |*star| {
+            const x = utils.generateRandomInt(0, ScreenSize.x);
+            const y = utils.generateRandomInt(0, ScreenSize.y);
+
+            const invert_alpha = utils.generateRandomInt(0, 1) == 1;
+            const alpha = @as(f32, @floatFromInt(utils.generateRandomInt(30, 60))) / 100.0;
+            const size: f32 = @floatFromInt(utils.generateRandomInt(1, 4));
+
+            star.size = .{ .x = size * 2, .y = size };
+            star.pos = .{ .x = @floatFromInt(x), .y = @floatFromInt(y) };
+            star.alpha = alpha;
+            star.invert_alpha = invert_alpha;
+            star.color = utils.generateColor();
+        }
+    }
+
+    fn draw(ptr: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        for (&self.stars) |*star| {
+            rl.DrawRectangle(@intFromFloat(star.pos.x), @intFromFloat(star.pos.y), @intFromFloat(star.size.x), @intFromFloat(star.size.y), rl.Fade(star.color, star.alpha));
+        }
+    }
+
+    fn update(ptr: *anyopaque) !void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const delta_time = rl.GetFrameTime();
+
+        for (&self.stars) |*star| {
+            const alpha = star.alpha;
+
+            if (alpha >= 0.9) {
+                star.invert_alpha = false;
+            } else if (alpha <= 0) {
+                star.invert_alpha = true;
+            }
+
+            const alpha_factor: f32 = if (star.invert_alpha == true) 0.2 else -0.2;
+
+            star.alpha += alpha_factor * delta_time * 4;
+            star.pos.x -= delta_time * 500;
+
+            if (star.pos.x <= 0) {
+                star.pos.x = ScreenSize.x;
+                star.pos.y = @floatFromInt(utils.generateRandomInt(0, ScreenSize.y));
+            }
+        }
+    }
+
+    fn deinit(ptr: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.alloc.destroy(self);
+    }
+};
+
 pub fn main() !void {
     defer {
         switch (gpa.deinit()) {
@@ -459,6 +553,9 @@ pub fn main() !void {
     }
 
     defer gameState.deinit();
+
+    const bg = try StarsBG.init(gpa_allocator);
+    try gameState.addObject(bg.obj);
 
     const player = try Player.init(gpa_allocator);
     try gameState.addObject(player.object);
